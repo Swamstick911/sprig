@@ -1,50 +1,74 @@
-// Screen-mirror hook. A drop-in replacement for write_pixel that draws to the
-// ST7735 as normal AND streams the frame to the SprigScope web app over USB.
-// Every screen update goes through fill_start/render/fill_end, so swapping
-// write_pixel -> mirror_write_pixel mirrors *everything* the Sprig shows.
+// Screen-mirror hook. Drop-in replacement for write_pixel: draws to the ST7735
+// as normal AND streams the frame to the SprigScope web app over USB. Streams
+// in small chunks (no full 40 KB framebuffer) so it fits in the Sprig's RAM
+// alongside the engine.
 
 #ifndef SCREEN_MIRROR_H
 #define SCREEN_MIRROR_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "pico/stdlib.h"
 #include "tusb.h"
 #include "HAL.h"   // Color, write_pixel
 
 #define MIRROR_PIXELS (160 * 128)
+#define MIRROR_CHUNK  256   // bytes per USB write (small footprint)
 
-static uint8_t  mirror_tx[4 + MIRROR_PIXELS * 2];
+static uint8_t  mirror_chunk[MIRROR_CHUNK];
+static uint32_t mirror_chunk_len = 0;
 static uint32_t mirror_idx = 0;
+static bool     mirror_active = false;
 
-static void mirror_send_frame(void) {
-    if (!tud_cdc_connected()) return;
-    mirror_tx[0] = 0xA5; mirror_tx[1] = 0x5A; mirror_tx[2] = 0xC3; mirror_tx[3] = 0x3C;
-    const uint32_t len = 4 + MIRROR_PIXELS * 2;
+// Push a buffer out the CDC; give up after a short timeout so we never hang.
+static bool mirror_write_all(const uint8_t *data, uint32_t len) {
     uint32_t sent = 0;
-    absolute_time_t deadline = make_timeout_time_ms(120);
+    absolute_time_t deadline = make_timeout_time_ms(40);
     while (sent < len) {
-        if (!tud_cdc_connected()) return;
+        if (!tud_cdc_connected()) return false;
         uint32_t avail = tud_cdc_write_available();
         if (avail > 0) {
             uint32_t n = len - sent;
             if (n > avail) n = avail;
-            sent += tud_cdc_write(mirror_tx + sent, n);
+            sent += tud_cdc_write(data + sent, n);
             tud_cdc_write_flush();
-            deadline = make_timeout_time_ms(120);
+            deadline = make_timeout_time_ms(40);
         } else {
-            if (time_reached(deadline)) return;
+            if (time_reached(deadline)) return false;
             sleep_us(200);
         }
     }
-    tud_cdc_write_flush();
+    return true;
 }
 
+static void mirror_flush_chunk(void) {
+    if (mirror_chunk_len && mirror_active) {
+        if (!mirror_write_all(mirror_chunk, mirror_chunk_len)) mirror_active = false;
+    }
+    mirror_chunk_len = 0;
+}
+
+// Drop-in for write_pixel: draw, then stream this frame if a host is connected.
 static void mirror_write_pixel(Color color) {
     write_pixel(color);
-    mirror_tx[4 + mirror_idx * 2]     = (uint8_t)(color >> 8);
-    mirror_tx[4 + mirror_idx * 2 + 1] = (uint8_t)(color & 0xFF);
-    if (++mirror_idx >= MIRROR_PIXELS) {
-        mirror_send_frame();
+
+    if (mirror_idx == 0) {              // start of a frame
+        mirror_chunk_len = 0;
+        mirror_active = tud_cdc_connected();
+        if (mirror_active) {
+            static const uint8_t magic[4] = {0xA5, 0x5A, 0xC3, 0x3C};
+            if (!mirror_write_all(magic, 4)) mirror_active = false;
+        }
+    }
+
+    if (mirror_active) {
+        mirror_chunk[mirror_chunk_len++] = (uint8_t)(color >> 8);   // big-endian
+        mirror_chunk[mirror_chunk_len++] = (uint8_t)(color & 0xFF);
+        if (mirror_chunk_len >= MIRROR_CHUNK) mirror_flush_chunk();
+    }
+
+    if (++mirror_idx >= MIRROR_PIXELS) {   // end of a frame
+        mirror_flush_chunk();
         mirror_idx = 0;
     }
 }
