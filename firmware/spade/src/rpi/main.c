@@ -27,6 +27,7 @@
 
 // More firmware stuiff
 #include "upload.h"
+#include "screen_mirror.h"
 
 // Other imports
 #include "shared/sprig_engine/base_engine.c"
@@ -51,7 +52,7 @@ static void fatal_error() {
     text_clear();
     render_errorbuf();
     fill_start();
-    render(write_pixel);
+    render(mirror_write_pixel);
     fill_end();
   }
 }
@@ -430,7 +431,7 @@ int main() {
 
         render_errorbuf();
         fill_start();
-        render(write_pixel);
+        render(mirror_write_pixel);
         fill_end();
 
         load_new_scripts();
@@ -488,7 +489,7 @@ int main() {
     // Render
     render_errorbuf();
     fill_start();
-    render(write_pixel);
+    render(mirror_write_pixel);
     fill_end();
   }
 
@@ -518,7 +519,7 @@ int main() {
                    " sprig.hackclub.com \n");
   render_errorbuf();
   fill_start();
-  render(write_pixel);
+  render(mirror_write_pixel);
   fill_end();
 
   /**
