@@ -130,6 +130,35 @@ char serial_commands[][128] = {
         {1, 2, 3, 4, '\0'} // null terminator so strlen() returns 4
 };
 
+// --- Web control: the web app sends button presses as ASCII letters over USB ---
+static Sprig_Button usb_char_to_button(int c) {
+    switch (c) {
+        case 'W': case 'w': return Button_W;
+        case 'S': case 's': return Button_S;
+        case 'A': case 'a': return Button_A;
+        case 'D': case 'd': return Button_D;
+        case 'I': case 'i': return Button_I;
+        case 'K': case 'k': return Button_K;
+        case 'J': case 'j': return Button_J;
+        case 'L': case 'l': return Button_L;
+        default: return Button_None;
+    }
+}
+
+#define USB_BTN_Q 16
+static volatile Sprig_Button usb_btn_q[USB_BTN_Q];
+static volatile uint8_t usb_btn_head = 0, usb_btn_tail = 0;
+static void usb_btn_push(Sprig_Button b) {
+    uint8_t n = (usb_btn_head + 1) % USB_BTN_Q;
+    if (n != usb_btn_tail) { usb_btn_q[usb_btn_head] = b; usb_btn_head = n; }
+}
+static Sprig_Button usb_btn_pop(void) {
+    if (usb_btn_head == usb_btn_tail) return Button_None;
+    Sprig_Button b = usb_btn_q[usb_btn_tail];
+    usb_btn_tail = (usb_btn_tail + 1) % USB_BTN_Q;
+    return b;
+}
+
 // returns which command is being sent from serial, or -1 for none
 static int read_command() {
 	// each index keeps track of how many characters we've matched to each command
@@ -140,6 +169,8 @@ static int read_command() {
     for (;;) {
         int c = getchar_timeout_us(timeout);
         if (c == PICO_ERROR_TIMEOUT) return -1;
+
+        { Sprig_Button vb = usb_char_to_button(c); if (vb != Button_None) { usb_btn_push(vb); return -1; } }
 
         timeout = 100;
 
@@ -218,6 +249,8 @@ typedef enum {
   }
 
   static Sprig_Button get_button_press() {
+      Sprig_Button b = usb_btn_pop();          // web presses first
+      if (b != Button_None) return b;
       if (!multicore_fifo_rvalid()) return Button_None;
       return (Sprig_Button) multicore_fifo_pop_blocking();
   }
@@ -464,9 +497,9 @@ int main() {
 
   // Event loop!
   while (1) {
-    // Handle any new button presses
-    while (multicore_fifo_rvalid()) {
-      spade_call_press(get_button_press());
+    // Handle any new button presses (physical or from the web app over USB)
+    for (Sprig_Button b; (b = get_button_press()) != Button_None; ) {
+      spade_call_press(b);
     }
 
     // Run async code
